@@ -13,6 +13,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.math.BigDecimal;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+
 /**
  * // TODO Comment
  */
@@ -27,62 +31,89 @@ public class EWalletService {
   @Autowired
   private TransactionRepository transactionRepository;
 
+  // Mutex map to hold a lock for each user
+  private final ConcurrentHashMap<Long, Lock> userLocks = new ConcurrentHashMap<>();
+
+  // Get or create a lock for the user
+  private Lock getLockForUser(Long userId) {
+    return userLocks.computeIfAbsent(userId, id -> new ReentrantLock());
+  }
+
   @Transactional
-  public synchronized Transaction credit(Long userId, BigDecimal amount) throws IllegalArgumentException {
+  public Transaction credit(Long userId, BigDecimal amount) throws IllegalArgumentException {
     logger.info("Processing credit transaction for user_id: {}, amount: {}", userId, amount);
-    
+
     if (amount.compareTo(BigDecimal.ZERO) <= 0) {
       logger.error("Invalid amount for credit transaction: {}", amount);
       throw new IllegalArgumentException("Invalid amount");
     }
 
-    User user = userRepository.findById(userId).orElseThrow(() -> {
-      logger.error("User not found for user_id: {} in credit method", userId);
-      return new RuntimeException("User not found");
-    });
-    user.setBalance(user.getBalance().add(amount));
+    Lock userLock = getLockForUser(userId);
+    userLock.lock();  // Acquiring the mutex lock
+    try {
+      User user = userRepository.findById(userId)
+          .orElseThrow(() -> {
+            logger.error("User not found with user_id: {}", userId);
+            return new RuntimeException("User not found");
+          });
 
-    Transaction transaction = new Transaction();
-    transaction.setUser(user);
-    transaction.setAmount(amount);
-    transaction.setType("credit");
+      user.setBalance(user.getBalance().add(amount));
 
-    userRepository.save(user);
-    Transaction savedTransaction = transactionRepository.save(transaction);
+      Transaction transaction = new Transaction();
+      transaction.setUser(user);
+      transaction.setAmount(amount);
+      transaction.setType("credit");
 
-    logger.info("Credit transaction successful for user_id: {}, transaction_id: {}", userId, savedTransaction.getId());
-    return savedTransaction;
+      userRepository.save(user);
+      Transaction savedTransaction = transactionRepository.save(transaction);
+
+      logger.info("Credit transaction successful for user_id: {}, transaction_id: {}", userId, savedTransaction.getId());
+      return savedTransaction;
+
+    } finally {
+      userLock.unlock();  // Releasing the mutex lock
+    }
   }
 
   @Transactional
-  public synchronized Transaction debit(Long userId, BigDecimal amount) throws IllegalArgumentException, RuntimeException {
+  public Transaction debit(Long userId, BigDecimal amount) throws IllegalArgumentException, RuntimeException {
     logger.info("Processing debit transaction for user_id: {}, amount: {}", userId, amount);
+
     if (amount.compareTo(BigDecimal.ZERO) <= 0) {
       logger.error("Invalid amount for debit transaction: {}", amount);
       throw new IllegalArgumentException("Invalid amount");
     }
 
-    User user = userRepository.findById(userId).orElseThrow(() -> {
-      logger.error("User not found for user_id: {} in debit method", userId);
-      return new RuntimeException("User not found");
-    });
-    if (user.getBalance().compareTo(amount) < 0) {
-      logger.error("Insufficient funds for user_id: {}, current_balance: {}, requested_amount: {}", userId, user.getBalance(), amount);
-      throw new RuntimeException("Insufficient funds");
+    Lock userLock = getLockForUser(userId);
+    userLock.lock();  // Acquiring the mutex lock
+    try {
+      User user = userRepository.findById(userId)
+          .orElseThrow(() -> {
+            logger.error("User not found with user_id: {}", userId);
+            return new RuntimeException("User not found");
+          });
+
+      if (user.getBalance().compareTo(amount) < 0) {
+        logger.error("Insufficient funds for user_id: {}, current_balance: {}, requested_amount: {}", userId, user.getBalance(), amount);
+        throw new RuntimeException("Insufficient funds");
+      }
+
+      user.setBalance(user.getBalance().subtract(amount));
+
+      Transaction transaction = new Transaction();
+      transaction.setUser(user);
+      transaction.setAmount(amount);
+      transaction.setType("debit");
+
+      userRepository.save(user);
+      Transaction savedTransaction = transactionRepository.save(transaction);
+
+      logger.info("Debit transaction successful for user_id: {}, transaction_id: {}", userId, savedTransaction.getId());
+      return savedTransaction;
+
+    } finally {
+      userLock.unlock();  // Releasing the mutex lock
     }
-
-    user.setBalance(user.getBalance().subtract(amount));
-
-    Transaction transaction = new Transaction();
-    transaction.setUser(user);
-    transaction.setAmount(amount);
-    transaction.setType("debit");
-
-    userRepository.save(user);
-    Transaction savedTransaction = transactionRepository.save(transaction);
-
-    logger.info("Debit transaction successful for user_id: {}, transaction_id: {}", userId, savedTransaction.getId());
-    return savedTransaction;
   }
 
   public BigDecimal getUserBalance(Long userId) {
